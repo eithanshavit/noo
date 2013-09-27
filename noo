@@ -1,0 +1,167 @@
+#!/usr/bin/env python
+import sys
+import os
+import smtplib
+import subprocess
+from email.mime.text import MIMEText
+from datetime import datetime
+import shelve
+import argparse
+
+class Response( object ):
+
+   def __init__( self ):
+      super( Response, self ).__init__()
+      self.rc =  None
+      self.output = ""
+      self.error = ""
+      self.success = False
+
+class Storage( object ):
+
+   def __init__( self, path ):
+      super( Storage, self ).__init__()
+      self._shelf = None
+      self._path = path
+
+   @property
+   def shelf( self ):
+      if not self._shelf:
+         self._shelf = shelve.open( self._path )
+      return self._shelf
+
+   def get( self, key ):
+      return self.shelf.get( key )
+
+   def save( self, key, value ):
+      self.shelf[ key ] = value
+      self.shelf.sync()
+
+class Noo( object ):
+   def __init__( self ):
+      super( Noo, self ).__init__()
+      path = os.path.join( os.environ.get( "HOME" ), ".noo" )
+      self.storage = Storage( path )
+      self.response = None
+      self.command = None
+      self.message = None
+
+   def validateAddress( self ):
+      good = True
+      if not self.destAddress:
+         good = False
+      if not self.originAddress:
+         good = False
+      return good
+
+   @property
+   def destAddress( self ):
+      return self.storage.get( "DestAddress" )
+
+   @property
+   def originAddress( self ):
+      return self.storage.get( "OrgAddress" )
+
+   def destAddressIs( self, address ):
+      print "Destination address set to \033[0;32m%s\033[0m" % address
+      self.storage.save( "DestAddress", address )
+
+   def originAddressIs( self, address ):
+      print "Origin address set to \033[0;32m%s\033[0m" % address
+      self.storage.save( "OrgAddress", address )
+
+   def run( self, command ):
+      self.command = command
+      print "Running command: \033[0;32m%s\033[0m" % command
+      print "Will email \033[0;32m%s\033[0m when done." % self.destAddress
+
+      self.response = Response()
+      p = subprocess.Popen( command, 
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            shell=True )
+      self.response.output, self.response.error = p.communicate()
+      self.response.rc = p.returncode
+      self.response.success = not bool( self.response.rc )
+
+   def formatMessage( self ):
+      response = self.response
+
+      success = response.success
+      subjectStrFlag = "Success" if success else "Failure"
+      timestamp = datetime.now().strftime( "%Y-%m-%dT%H:%M" )
+
+      msgText = "noo\n---\nCommand: %s\nReturn code: %d" \
+                % ( self.command, response.rc )
+      if response.output:
+         msgText += "\nOutput:\n" + response.output
+      if response.error:
+         msgText += "\nError:\n" + response.error
+      elif not response.output:
+         msgText += "\nNo output to present."
+      msg = MIMEText( msgText )
+      msg['Subject'] = 'noo: %s at %s' % ( subjectStrFlag, timestamp )
+      msg['From'] = self.originAddress
+      msg['To'] = self.destAddress
+      
+      self.message = msg
+   
+   def sendMessage( self ):
+      # Send the message via our own SMTP server, but don't include the
+      # envelope header.
+      s = smtplib.SMTP( 'localhost' )
+      s.sendmail( self.originAddress, [self.destAddress], self.message.as_string() )
+      s.quit()
+
+   def output( self ):
+      if self.response.output:
+         print "Output:"
+         print self.response.output
+
+   def showConfig( self ):
+      print "Destination address is \033[0;32m%s\033[0m" % self.destAddress
+      print "Origin address is \033[0;32m%s\033[0m" % self.originAddress
+
+def main():
+   parser = argparse.ArgumentParser()
+   parser.add_argument( "command",
+                        help="The command to run and notify about. Use \"\" for" +
+                             " Multiple word commands.",
+                        nargs=argparse.REMAINDER,
+                        default=None )
+   parser.add_argument( "-d", "--destination",
+                        help="Set the default Destination Email address.",
+                        type=str )
+   parser.add_argument( "-o", "--origin",
+                        help="Set the default Origin Email address.",
+                        type=str )
+   parser.add_argument( "-s", "--show",
+                        help="Show settings",
+                        action='store_const',
+                        const=True )
+   args = parser.parse_args()
+
+   noo = Noo()
+
+   if args.destination:
+      noo.destAddressIs( args.destination )
+   if args.origin:
+      noo.originAddressIs( args.origin )
+   if args.show:
+      noo.showConfig()
+   if not args.command:
+      return 0
+   command = " ".join( args.command )
+
+   if not noo.validateAddress():
+      print "Please set destination and origin addresses."
+      return 1
+
+   noo.run( command )
+   noo.formatMessage()
+   noo.sendMessage()
+   noo.output()
+   return 0
+   
+if __name__ == "__main__":
+   sys.exit( main() )
